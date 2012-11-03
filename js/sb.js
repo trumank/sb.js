@@ -24,22 +24,67 @@ sb.extend(sb.Project.prototype, {
 			var stream = new sb.ByteStream(xhr.response);
 			if (stream.utf8(8) === 'ScratchV') {
 				if (Number(stream.utf8(2) > 0)) {
-					self.read1(stream);
-					onload(true);
+					self.read1(stream, onload);
+					return;
 				}
 			} else {
 				stream.set(0);
-				// TODO: implement 2.0 read
-				onload(false);
+				if (stream.utf8(2) === 'PK') {
+					stream.set(0);
+					self.read2(stream, onload);
+					return;
+				}
 			}
+			onload(false);
 		};
 		xhr.send();
 	},
-	read1: function (stream) {
+	read1: function (stream, onload) {
 		stream.uint32();
 		var ostream = new sb.ObjectStream(stream);
 		this.info = ostream.readObject();
-		window.stage = this.stage = ostream.readObject();
+		this.stage = ostream.readObject();
+		onload(true);
+	},
+	read2: function (stream, onload) {
+		var array = stream._uint8array;
+		var string = '';
+		for (var i = 0; i < array.length; i++) {
+			string += String.fromCharCode(array[i]);
+		}
+		var zip = new JSZip(string, {base64:false});
+		var images = zip.file(/[0-9]+\.png/).sort(function (a, b) {
+			return parseInt(a.name, 10) - parseInt(b.name, 10);  
+		}).map(function (file) {
+			var image = new Image();
+			image.src = 'data:image/png;base64,' + btoa(file.data);
+			return image;
+		});
+		var fixImages = function (costumes) {
+			var i = costumes.length;
+			while (i--) {
+				var obj = costumes[i];
+				obj.image = images[obj.baseLayerID];
+				delete obj.baseLayerID;
+				delete obj.baseLayerMD5;
+			}
+		}
+		var stage = JSON.parse(zip.file('project.json').data);
+		fixImages(stage.costumes);
+		
+		var children = stage.children;
+		var i = children.length;
+		while (i--) {
+			if (children[i].costumes) {
+				fixImages(children[i].costumes);
+			}
+		}
+		
+		this.info = stage.info;
+		delete stage.info;
+		this.stage = stage;
+		
+		onload(true);
 	}
 });
 
@@ -126,7 +171,7 @@ sb.extend(sb.ObjectStream.prototype, {
 			this.fixObjectRefs(table, table[i]);
 		}
 		
-		return this.jsonify(table[0]);
+		return this.jsonify(this.deRef(table, table[0]));
 	},
 	readTableObject: function () {
 		var id = this._stream.uint8();
@@ -567,7 +612,13 @@ sb.extend(sb.ObjectStream.prototype, {
 					};
 				});
 			},
-			lists: 20
+			lists: function (fields) {
+				var lists = fields[20];
+				var listNames = Object.keys(lists);
+				return listNames.map(function (d) {
+					return lists[d];
+				});
+			}
 		},
 		162: {
 			costumeName: 0,

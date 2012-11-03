@@ -1,14 +1,23 @@
 <html>
   <head>
     <script type="text/javascript" src="js/sb.js"></script>
+    <script type="text/javascript" src="js/jszip/jszip.js"></script>
+    <script type="text/javascript" src="js/jszip/jszip-load.js"></script>
+    <script type="text/javascript" src="js/jszip/jszip-deflate.js"></script>
+    <script type="text/javascript" src="js/jszip/jszip-inflate.js"></script>
   </head>
   <body>
   	<button id="read">read</button>
     <script type="text/javascript">
     	document.getElementById('read').addEventListener('click', function () {
-			var project = window.project = new sb.Project('Scratch Brawl X (Compressed).sb');
-			project.open(function (success) {
-				console.log(project);
+			var project1 = new sb.Project('MarioBros.sb');
+			project1.open(function (success) {
+				console.log('Project1:', project1);
+			});
+			
+			var project2 = new sb.Project('MarioBros.sb2');
+			project2.open(function (success) {
+				console.log('Project2:', project2);
 			});
 		});
     </script>
