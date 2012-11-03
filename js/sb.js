@@ -15,7 +15,7 @@ sb.Project = function (path) {
 };
 
 sb.extend(sb.Project.prototype, {
-	open: function () {
+	open: function (onload) {
 		var self = this;
 		var xhr = new XMLHttpRequest();
 		xhr.open('GET', this._path, true);
@@ -24,22 +24,22 @@ sb.extend(sb.Project.prototype, {
 			var stream = new sb.ByteStream(xhr.response);
 			if (stream.utf8(8) === 'ScratchV') {
 				if (Number(stream.utf8(2) > 0)) {
-					console.log('< 2.0');
 					self.read1(stream);
+					onload(true);
 				}
+			} else {
+				stream.set(0);
+				// TODO: implement 2.0 read
+				onload(false);
 			}
 		};
 		xhr.send();
 	},
 	read1: function (stream) {
-		console.log('Info: ' + stream.uint32());
+		stream.uint32();
 		var ostream = new sb.ObjectStream(stream);
-		console.time('read');
-		console.log(this.info = ostream.readObject());
-		console.timeEnd('read');
-		console.time('read');
-		console.log(window.stage = this.stage = ostream.readObject());
-		console.timeEnd('read');
+		this.info = ostream.readObject();
+		window.stage = this.stage = ostream.readObject();
 	}
 });
 
@@ -64,23 +64,17 @@ sb.extend(sb.ByteStream.prototype, {
 		return string;
 	},
 	arrayBuffer: function (length, reverse) {
-		var array = new Uint8Array(length);
 		if (reverse) {
+			var array = new Uint8Array(length);
 			var i = length;
 			while (i--) {
 				array[i] = this.uint8();
 			}
-		} else {
-			for (var i = 0; i < length; i++) {
-				array[i] = this.uint8();
-			}
+			return array.buffer;
 		}
-		return array.buffer;
+		return this.buffer.slice(this._index, this._index += length);
 	},
 	uint8: function () {
-		if (this.index >= this._uint8array.length) {
-			throw new Error('End of stream: ' + this.index);
-		}
 		return this._uint8array[this._index++];
 	},
 	int8: function () {
@@ -92,17 +86,17 @@ sb.extend(sb.ByteStream.prototype, {
 	},
 	int16: function () {
 		var i = this.uint16();
-		return i > 32767 ? i - 0xffff : i;
+		return i > 0x7fff ? i - 0xffff : i;
 	},
 	uint24: function () {
 		return this.uint8() << 16 | this.uint8() << 8 | this.uint8();
 	},
 	uint32: function () {
-		return this.uint8() * 16777216 + (this.uint8() << 16) + (this.uint8() << 8) + this.uint8();
+		return this.uint8() * 0x1000000 + (this.uint8() << 16) + (this.uint8() << 8) + this.uint8();
 	},
 	int32: function () {
 		var i = this.uint32();
-		return i > 2147483647 ? i - 0xffffffff : i;
+		return i > 0x7fffffff ? i - 0xffffffff : i;
 	},
 	float64: function () {
 		return new Float64Array(this.arrayBuffer(8, true))[0];
@@ -132,9 +126,7 @@ sb.extend(sb.ObjectStream.prototype, {
 			this.fixObjectRefs(table, table[i]);
 		}
 		
-		this.buildMedia(table);
-		
-		return this.deRef(table, table[0]);
+		return this.jsonify(table[0]);
 	},
 	readTableObject: function () {
 		var id = this._stream.uint8();
@@ -169,7 +161,9 @@ sb.extend(sb.ObjectStream.prototype, {
 		case 12: // SoundBuffer
 			return new Uint16Array(this._stream.arrayBuffer(this._stream.uint32() * 2));
 		case 13: // Bitmap
-			return new Uint32Array(this._stream.arrayBuffer(this._stream.uint32() * 4));
+			var a = new Uint8Array(this._stream.arrayBuffer(this._stream.uint32() * 4));
+			a.bitmap = true;
+			return a;
 		case 20: // Array
 		case 21: // OrderedCollection
 			var array = [];
@@ -180,7 +174,7 @@ sb.extend(sb.ObjectStream.prototype, {
 			return array;
 		case 24: // Dictionary
 		case 25: // IdentityDictionary
-			var array = {};
+			var array = new sb.Dict();
 			var i = this._stream.uint32();
 			while (i--) {
 				array[i] = [this.readInline(), this.readInline()];
@@ -305,6 +299,7 @@ sb.extend(sb.ObjectStream.prototype, {
 			object.object.colors = this.deRef(table, object.object.colors);
 		case 34:
 			object.object.bitmap = this.deRef(table, object.object.bitmap);
+			object.object.canvas = this.buildImage(object.object);
 			break;
 		}
 	},
@@ -315,63 +310,8 @@ sb.extend(sb.ObjectStream.prototype, {
 		}
 		return object && object.object || object;
 	},
-	buildMedia: function (table) {
-		var i = table.length;
-		while (i--) {
-			var id = table[i].id;
-			if (id === 34 || id === 35) {
-				table[i].object.canvas = this.buildImage(table[i].object);
-			}
-		}
-	},
 	buildImage: function (image) {
 		var bitmap = image.bitmap;
-		if (bitmap instanceof Uint8Array) {
-			var stream = new sb.ByteStream(bitmap.buffer);
-			var nInt = function () {
-				var i = stream.uint8();
-				if (i <= 223) {
-					return i;
-				} else if (i <= 254) {
-					return (i - 224) * 256 + stream.uint8();
-				}
-				return stream.uint32();
-			}
-			var length = nInt();
-			var decoded = new Uint32Array(length);
-			
-			var j, k, l, m, n, i = 0;
-			
-			while (i < length) {
-				k = nInt();
-				l = k >> 2;
-				switch(k & 3) {
-				case 0:
-					i++;
-					break;
-				case 1:
-					n = stream.uint8();
-					m = n * 16777216 + (n << 16) + (n << 8) + n;
-					while (l--) {
-						decoded[i++] = m;
-					}
-					break;
-				case 2:
-					m = stream.uint32();
-					while (l--) {
-						decoded[i++] = m;
-					}
-					break;
-				case 3:
-					while (l--) {
-						decoded[i++] = stream.uint32();
-					}
-					break;
-				}
-			}
-			
-			bitmap = decoded;
-		}
 		
 		var canvas = document.createElement('canvas');
 		canvas.width = image.width;
@@ -379,55 +319,296 @@ sb.extend(sb.ObjectStream.prototype, {
 		var ctx = canvas.getContext('2d');
 		
 		var data = ctx.createImageData(image.width, image.height);
-		var array = data.data;
 		
-		if (image.depth <= 8) {
-			var colors = image.colors || this.squeakColors;
-			var l = bitmap.length / image.height;
-			var i1 = (1 << image.depth) - 1;
-			var j1 = 32 / image.depth;
-			for(var y = 0; y < image.height; y++) {
-				for(var x = 0; x < image.width; x++) {
-					var i2 = bitmap[y * l + Math.floor(x / j1)];
-					var j2 = image.depth * (j1 - x % j1 - 1);
-					var pi = (y * image.width + x) * 4;
-					var ci = i2 / (1 << j2) & i1;
-					var c = colors[ci];
-					if (c) {
-						array[pi] = c.r;
-						array[pi + 1] = c.g;
-						array[pi + 2] = c.b;
-						array[pi + 3] = c.a === 0 ? 0 : 0xff;
+		if (image.depth === 32) {
+			if (!bitmap.bitmap) {
+				this.decompressBitmapFlip(bitmap, data.data);
+			}
+		} else if (image.depth <= 8) {
+			var indexes = bitmap.bitmap ? bitmap : this.decompressBitmap(bitmap);
+			
+			var bits;
+			
+			if (image.depth === 8) {
+				bits = indexes;
+			} else {
+				bits = new Uint8Array(indexes.length * (8 / image.depth));
+				
+				var mask = (1 << image.depth) - 1;
+				
+				var parts = 8 / image.depth;
+				
+				var i,
+					j = 0,
+					k, l;
+				
+				for (i = 0; i < indexes.length; i++) {
+					l = indexes[i];
+					k = 8;
+					while ((k -= image.depth) >= 0) {
+						bits[j++] = (l >> k) & mask;
 					}
 				}
 			}
-		} else if (image.depth === 16) {
-			bitmap = new Uint16Array(bitmap.buffer)
-			var hw = Math.round(image.width / 2);
-			var i, j, k = 0, l = 0;
-			for (var l = 0; l < array.length; l++) {
-				if (l % image.width === 0) {
-					l++;
+			
+			var colors = image.colors || this.squeakColors;
+			var array = data.data;
+			
+			i = 0;
+			j = 0;
+			
+			var c, b;
+			
+			k = array.length;
+			while (k--) {
+				c = colors[bits[j++]];
+				if (c) {
+					array[i++] = c.r;
+					array[i++] = c.g;
+					array[i++] = c.b;
+					array[i++] = c.a === 0 ? 0 : 0xff;
+				} else {
+					i += 4;
 				}
-				j = bitmap[l];
-				array[k++] = (j >> 10 & 0x1f) << 3;
-				array[k++] = (j >> 5 & 0x1f) << 3;
-				array[k++] = (j & 0x1f) << 3;
-				array[k++] = 0xff;
-			}
-		} else if (image.depth === 32) {
-			var c, j = 0;
-			for (var i = 0; i < array.length; i++) {
-				c = bitmap[i];
-				array[j++] = c >> 16 & 0xff;
-				array[j++] = c >> 8 & 0xff;
-				array[j++] = c & 0xff;
-				array[j++] = c === 0 ? 0 : 0xff;
 			}
 		}
 		
 		ctx.putImageData(data, 0, 0);
+		
 		return canvas;
+	},
+	decompressBitmapFlip: function (src, out) {
+		var stream = new sb.ByteStream(src.buffer);
+		var nInt = function () {
+			var i = stream.uint8();
+			return i <= 223 ? i : (i <= 254 ? (i - 224) * 256 + stream.uint8() : stream.uint32());
+		}
+		var length = nInt() * 4;
+		if (!out) {
+			out = new Uint8Array(length);
+		}
+		
+		var j, k, l, m, n, i = 0;
+		
+		while (i < length) {
+			k = nInt();
+			l = k >> 2;
+			switch(k & 3) {
+			case 0:
+				i += 4;
+				break;
+			case 1:
+				m = stream.uint8();
+				while (l--) {
+					out[i++] = m;
+					out[i++] = m;
+					out[i++] = m;
+					out[i++] = m;
+				}
+				break;
+			case 2:
+				m = [stream.uint8(), stream.uint8(), stream.uint8(), stream.uint8()];
+				while (l--) {
+					out[i++] = m[1];
+					out[i++] = m[2];
+					out[i++] = m[3];
+					out[i++] = m[0];
+				}
+				break;
+			case 3:
+				while (l--) {
+					n = stream.uint8()
+					out[i++] = stream.uint8();
+					out[i++] = stream.uint8();
+					out[i++] = stream.uint8();
+					out[i++] = n;
+				}
+				break;
+			}
+		}
+	},
+	decompressBitmap: function (src) {
+		var stream = new sb.ByteStream(src.buffer);
+		var nInt = function () {
+			var i = stream.uint8();
+			return i <= 223 ? i : (i <= 254 ? (i - 224) * 256 + stream.uint8() : stream.uint32());
+		}
+		var length = nInt() * 4;
+		var out = new Uint8Array(length);
+		
+		var j, k, l, m, n, i = 0;
+		
+		while (i < length) {
+			k = nInt();
+			l = k >> 2;
+			switch(k & 3) {
+			case 0:
+				i += 4;
+				break;
+			case 1:
+				m = stream.uint8();
+				while (l--) {
+					out[i++] = m;
+					out[i++] = m;
+					out[i++] = m;
+					out[i++] = m;
+				}
+				break;
+			case 2:
+				m = [stream.uint8(), stream.uint8(), stream.uint8(), stream.uint8()];
+				while (l--) {
+					out[i++] = m[0];
+					out[i++] = m[1];
+					out[i++] = m[2];
+					out[i++] = m[3];
+				}
+				break;
+			case 3:
+				while (l--) {
+					out[i++] = stream.uint8();
+					out[i++] = stream.uint8();
+					out[i++] = stream.uint8();
+					out[i++] = stream.uint8();
+				}
+				break;
+			}
+		}
+		return out;
+	},
+	
+	jsonify: function (object, parent) {
+		if (object && object.id && this.readFormats[object.id]) {
+			var self = this;
+			var format = this.readFormats[object.id];
+			var json = {};
+			for (var field in format) {
+				var value = format[field];
+				var type = typeof value;
+				var tmp;
+				if (type === 'number') {
+					tmp = object.fields[value];
+				} else if (type === 'function') {
+					tmp = value(object.fields, parent);
+				} else {
+					tmp = value;
+				}
+				
+				json[field] = this.jsonify(tmp, object);
+			}
+			return json;
+		} else if (object instanceof sb.Dict) {
+			var json = {};
+			for (var key in object) {
+				json[key] = this.jsonify(object[key], parent);
+			}
+			return json;
+		} else if (object instanceof Array) {
+			var self = this;
+			return object.map(function (d) {
+				return self.jsonify(d, parent);
+			});
+		}
+		return object;
+	},
+	
+	readFormats: {
+		124: {
+			objName: 6,
+			sounds: function (fields) {
+				return fields[10].filter(function (media) {
+					return media.id === 164;
+				});
+			},
+			costumes: function (fields) {
+				return fields[10].filter(function (media) {
+					return media.id === 162;
+				});
+			},
+			scratchX: function (fields, parent) {
+				return fields[0].ox + fields[11].fields[2].x - parent.fields[0].cx / 2;
+			},
+			scratchY: function (fields, parent) {
+				return parent.fields[0].cy / 2 - (fields[0].oy + fields[11].fields[2].y);
+			},
+			variables: function (fields) {
+				var vars = fields[7];
+				var varNames = Object.keys(vars);
+				return varNames.map(function (d) {
+					return {
+						name: d,
+						value: vars[d],
+						isPersistent: false
+					};
+				});
+			},
+			lists: 20
+		},
+		125: { 
+			objName: 6,
+			sounds: function (fields) {
+				return fields[10].filter(function (media) {
+					return media.id === 164;
+				});
+			},
+			costumes: function (fields) {
+				return fields[10].filter(function (media) {
+					return media.id === 162;
+				});
+			},
+			children: 2,
+			variables: function (fields) {
+				var vars = fields[7];
+				var varNames = Object.keys(vars);
+				return varNames.map(function (d) {
+					return {
+						name: d,
+						value: vars[d],
+						isPersistent: false
+					};
+				});
+			},
+			lists: 20
+		},
+		162: {
+			costumeName: 0,
+			rotationCenterX: function (fields) {
+				return fields[2].x;
+			},
+			rotationCenterY: function (fields) {
+				return fields[2].y;
+			},
+			image: function (fields) {
+				return (fields[6] || fields[1]).canvas;
+			},
+		},
+		164: {
+			soundName: 0,
+			sound: null
+			// TODO: implement sound
+		},
+		175: {
+			listName: 8,
+			contents: 9,
+			isPersistent: false,
+			target: function (fields) {
+				return fields[10].fields[6];
+			},
+			x: function (fields) {
+				return fields[0].ox;
+			},
+			y: function (fields) {
+				return fields[0].oy;
+			},
+			width:  function (fields) {
+				return fields[0].cx - fields[0].ox;
+			},
+			height:  function (fields) {
+				return fields[0].cy - fields[0].oy;
+			},
+			visible: function (fields) {
+				return !!fields[1];
+			},
+		}
 	}
 });
 
@@ -479,6 +660,4 @@ sb.extend(sb.ObjectStream.prototype, {
 	sb.ObjectStream.prototype.squeakColors = colors;
 }) ();
 
-sb.Stage = function () {
-	this.sprites = [];
-}
+sb.Dict = function () {};

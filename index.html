@@ -3,12 +3,14 @@
     <script type="text/javascript" src="js/sb.js"></script>
   </head>
   <body>
+  	<button id="read">read</button>
     <script type="text/javascript">
-    	var project = new sb.Project('Summer.sb');
-    	project.onload = function (success) {
-    		console.log(success ? 'succeeded' : 'failed', project);
-    	};
-    	project.open();
+    	document.getElementById('read').addEventListener('click', function () {
+			var project = window.project = new sb.Project('Scratch Brawl X (Compressed).sb');
+			project.open(function (success) {
+				console.log(project);
+			});
+		});
     </script>
   </body>
 </html>
