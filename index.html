@@ -10,12 +10,12 @@
   	<button id="read">read</button>
     <script type="text/javascript">
     	document.getElementById('read').addEventListener('click', function () {
-			var project1 = new sb.Project('MarioBros.sb');
+			window.project1 = new sb.Project('Summer.sb');
 			project1.open(function (success) {
 				console.log('Project1:', project1);
 			});
 			
-			var project2 = new sb.Project('MarioBros.sb2');
+			window.project2 = new sb.Project('MarioBros.sb2');
 			project2.open(function (success) {
 				console.log('Project2:', project2);
 			});
