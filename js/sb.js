@@ -59,6 +59,7 @@ sb.extend(sb.Project.prototype, {
 		stream.uint32();
 		var ostream = new sb.ObjectStream(stream);
 		this.info = ostream.readObject();
+		window.buffer = stream.buffer; 
 		this.stage = ostream.readObject();
 		onload(true);
 	},
@@ -73,15 +74,21 @@ sb.extend(sb.Project.prototype, {
 		var images = zip.file(/[0-9]+\.png/).sort(function (a, b) {
 			return parseInt(a.name, 10) - parseInt(b.name, 10);  
 		}).map(function (file) {
+			var canvas = sb.createCanvas(1, 1);
 			var image = new Image();
+			image.onload = function () {
+				canvas.width = image.width;
+				canvas.height = image.height;
+				canvas.getContext('2d').drawImage(image, 0, 0);
+			};
 			image.src = 'data:image/png;base64,' + btoa(file.data);
-			return image;
+			return canvas;
 		});
 		var fixImages = function (costumes) {
 			var i = costumes.length;
 			while (i--) {
 				var obj = costumes[i];
-				obj.image = images[obj.baseLayerID];
+				obj.image = images[obj.baseLayerID - 1];
 				delete obj.baseLayerID;
 				delete obj.baseLayerMD5;
 			}
@@ -97,6 +104,23 @@ sb.extend(sb.Project.prototype, {
 			}
 		}
 		
+		var defaults = {
+			variables: [],
+			volume: 100, // TODO: is this in sb2?
+			tempoBPM: 60
+		};
+		var sprites = stage.children.filter(function (child) {
+			return child.objName;
+		});
+		
+		sprites.concat([stage]).forEach(function (object) {
+			Object.keys(defaults).forEach(function (d) {
+				if (!object[d]) {
+					object[d] = defaults[d];
+				}
+			})
+		});
+		
 		this.info = stage.info;
 		delete stage.info;
 		this.stage = stage;
@@ -106,15 +130,25 @@ sb.extend(sb.Project.prototype, {
 	
 	save1: function () {
 		var stream = new sb.WriteStream();
+		var objectStream = new sb.ObjectStream(stream);
+		
 		stream.utf8('ScratchV02');
 		
-		var objectStream = new sb.ObjectStream(stream);
-		var string = 'string1';
-		objectStream.writeObject({
-			key1: string,
-			key2: string,
-			key3: 'blah'
-		}, 24);
+		var sizeIndex = stream.index;
+		stream.uint32(0);
+		
+		var self = this;
+		var size = objectStream.writeObject(Object.keys(this.info).map(function (key) {
+			return [key, self.info[key]];
+		}), 24, function (key, value) {
+			return [14, ['penTrails', 'thumbnail'].indexOf(key) === -1 ? 14 : 34];
+		});
+		var end = stream.index;
+		stream.index = sizeIndex;
+		stream.uint32(size);
+		stream.index = end;
+		
+		objectStream.writeObject(this.stage, 125);
 		
 		return stream.buffer();
 	}
@@ -156,14 +190,14 @@ sb.extend(sb.ReadStream.prototype, {
 	},
 	int8: function () {
 		var i = this.uint8();
-		return i > 0x7f ? i - 0xff : i;
+		return i > 0x7f ? i - 0x100 : i;
 	},
 	uint16: function () {
 		return this.uint8() << 8 | this.uint8();
 	},
 	int16: function () {
 		var i = this.uint16();
-		return i > 0x7fff ? i - 0xffff : i;
+		return i > 0x7fff ? i - 0x10000 : i;
 	},
 	uint24: function () {
 		return this.uint8() << 16 | this.uint8() << 8 | this.uint8();
@@ -173,7 +207,7 @@ sb.extend(sb.ReadStream.prototype, {
 	},
 	int32: function () {
 		var i = this.uint32();
-		return i > 0x7fffffff ? i - 0xffffffff : i;
+		return i > 0x7fffffff ? i - 0x100000000 : i;
 	},
 	float64: function () {
 		return new Float64Array(this.arrayBuffer(8, true))[0];
@@ -260,18 +294,196 @@ sb.ObjectStream = function (stream) {
 };
 
 sb.extend(sb.ObjectStream.prototype, {
-	writeObject: function (object, id) {
+	writeObject: function (object, id, hint) {
+		var start = this.stream.index;
 		this.stream.utf8('ObjS\x01Stch\x01');
 		
-		//this.buildObjectTable(object, id);
+		var table = [];
+		table.raw = [];
 		
-		var table = [object];
+		this.object = object;
+		
+		this.createObject(table, object, id, hint);
+		
+		this.stream.uint32(table.length);
+		
+		var self = this;
+		table.forEach(function (object) {
+			self.writeTableObject(object);
+		});
+		
+		delete this.object;
+		
+		return this.stream.index - start;
 	},
-	writeObjectTable: function (table) {
+	createObject: function (table, object, id, hint) {
+		if (!id) {
+			return object;
+		}
+		var i = table.raw.indexOf(object);
+		if (i !== -1 && typeof object === 'object') {
+			return {$: i + 1};
+		}
+		table.raw.push(object);
+		var record = {
+			id: id
+		};
+		table.push(record);
+		var ref = {$: table.length};
 		
+		var format = this.formats[id];
+		if (format) {
+			var self = this;
+			if (id < 99) {
+				record.value = format.write.call(this, object, table, hint); 
+			} else {
+				record.version = format.version;
+				record.value = format.write.map(function (field) {
+					return typeof field === 'function' ? field.call(self, object, table) : field;
+				});
+			}
+		} else {
+			record.value = object;
+		}
+		return ref;
 	},
-	buildObjectTable: function (object, id) {
+	changingIds: [
+		30, 31, // colors
+		34, 35  // forms
+	],
+	writeTableObject: function (object) {
+		if (this.changingIds.indexOf(object.id) === -1) {
+			this.stream.uint8(object.id);
+		}
 		
+		if (object.id < 99) {
+			this.writeFixedFormat(object);
+		} else {
+			this.writeUserFormat(object);
+		}
+	},
+	writeUserFormat: function (object) {
+		this.stream.uint8(object.version);
+		this.stream.uint8(object.value.length);
+		
+		var self = this;
+		object.value.forEach(function (field) {
+			self.writeInline(field);
+		});
+	},
+	writeFixedFormat: function (object) {
+		var self = this;
+		switch (object.id) {
+		case 9:
+		case 10:
+		case 14:
+			this.stream.uint32(object.value.length);
+			this.stream.utf8(object.value); // TODO: Non-utf8 store
+			break;
+		case 13: // Bitmap
+			this.stream.uint32(object.value.length / 4);
+			var array = new Uint8Array(object.value);
+			var i = 0;
+			while (i < array.length) {
+				this.stream.uint8(array[i + 3]);
+				this.stream.uint8(array[i + 0]);
+				this.stream.uint8(array[i + 1]);
+				this.stream.uint8(array[i + 2]);
+				i += 4;
+			}
+			break;
+		case 20: // Array
+		case 21: // OrderedCollection
+			this.stream.uint32(object.value.length);
+			object.value.forEach(function (field) {
+				self.writeInline(field);
+			});
+			break;
+		case 24: // Dictionary
+		case 25: // IdentityDictionary
+			this.stream.uint32(object.value.length);
+			object.value.forEach(function (pair) {
+				self.writeInline(pair[0]);
+				self.writeInline(pair[1]);
+			});
+			break;
+		case 30: // Color
+		case 31: // TranslucentColor
+			var c = object.value;
+			this.stream.uint8(c.a === 255 ? 30 : 31);
+			this.stream.uint32(c.r << 22 | c.g << 12 | c.b << 2);
+			if (c.a !== 255) {
+				this.stream.uint8(c.a);
+			}
+			break;
+		case 32: // Point
+			this.writeInline(object.value.x);
+			this.writeInline(object.value.y);
+			break;
+		case 33: // Rectangle
+			this.writeInline(object.value.ox);
+			this.writeInline(object.value.oy);
+			this.writeInline(object.value.cx);
+			this.writeInline(object.value.cy);
+			break;
+		case 34: // Form
+		case 35: // ColorForm
+			var colorForm = !!object.value.colors;
+			this.stream.uint8(colorForm ? 35 : 34);
+			this.writeInline(object.value.width);
+			this.writeInline(object.value.height);
+			this.writeInline(object.value.depth);
+			this.writeInline(object.value.offset);
+			this.writeInline(object.value.bitmap);
+			if (colorForm) {
+				this.writeInlint(object.value.colors);
+			}
+			break;
+		default:
+			console.warn('No fixed format write for id', object.id);
+		}
+	},
+	writeInline: function (object) {
+		var id;
+		if (object && object.$) { // ObjectRef
+			id = 99;
+		} else if (object === null) {
+			id = 1;
+		} else if (object === true) {
+			id = 2;
+		} else if (object === false) {
+			id = 3;
+		} else if (typeof object === 'number') {
+			if (object !== Math.floor(object)) {
+				id = 8;
+			} else if (object >= -0x10000 && object <= 0xffff) {
+				id = 5;
+			} else if (object >= -0x100000000 && object <= 0xffffffff) {
+				id = 4;
+			} else {
+				id = object < 0 ? 7 : 6;
+			}
+		} else {
+			console.warn('Cannot determine type of', object);
+		}
+		
+		this.stream.uint8(id);
+		
+		switch (id) {
+		case 4: // SmallInteger
+			this.stream.int32(object);
+			break;
+		case 5: // SmallInteger16
+			this.stream.int16(object);
+			break;
+			// TODO: large numbers
+		case 8:
+			this.stream.float64(object);
+			break;
+		case 99:
+			this.stream.uint24(object.$);
+			break;
+		}
 	},
 	
 	readObject: function () {
@@ -319,7 +531,8 @@ sb.extend(sb.ObjectStream.prototype, {
 	readFixedFormat: function (id) {
 		var array,
 			i,
-			color;
+			color,
+			canvas;
 		switch (id) {
 		case 9: // String
 		case 10: // Symbol
@@ -328,7 +541,7 @@ sb.extend(sb.ObjectStream.prototype, {
 		case 11: // ByteArray
 			return new Uint8Array(this.stream.arrayBuffer(this.stream.uint32()));
 		case 12: // SoundBuffer
-			return new Uint16Array(this.stream.arrayBuffer(this.stream.uint32() * 2));
+			return new Uint8Array(this.stream.arrayBuffer(this.stream.uint32() * 2));
 		case 13: // Bitmap
 			var a = new Uint8Array(this.stream.arrayBuffer(this.stream.uint32() * 4));
 			a.bitmap = true;
@@ -378,22 +591,26 @@ sb.extend(sb.ObjectStream.prototype, {
 				cy: this.readInline()
 			};
 		case 34: // Form
-			return {
+			var canvas = sb.createCanvas(1, 1);
+			sb.extend(canvas, {
 				width: this.readInline(),
 				height: this.readInline(),
 				depth: this.readInline(),
 				offset: this.readInline(),
 				bitmap: this.readInline()
-			};
+			});
+			return canvas;
 		case 35: // ColorForm
-			return {
+			var canvas = sb.createCanvas(1, 1);
+			sb.extend(canvas, {
 				width: this.readInline(),
 				height: this.readInline(),
 				depth: this.readInline(),
 				offset: this.readInline(),
 				bitmap: this.readInline(),
 				colors: this.readInline()
-			};
+			});
+			return canvas;
 		}
 		throw new Error('Unknown fixed format class ' + id);
 	},
@@ -468,34 +685,26 @@ sb.extend(sb.ObjectStream.prototype, {
 			break;
 		case 34:
 			object.object.bitmap = this.deRef(table, object.object.bitmap);
-			object.object.canvas = this.buildImage(object.object);
+			this.buildImage(object.object);
 			break;
 		case 35:
 			object.object.bitmap = this.deRef(table, object.object.bitmap);
-			object.object.canvas = this.buildImage(object.object);
 			object.object.colors = this.deRef(table, object.object.colors);
+			this.buildImage(object.object);
 			break;
 		}
 	},
 	deRef: function (table, object) {
 		if (object && object.isRef) {
 			var obj = table[object.index - 1];
-			return obj.object || obj;
+			return typeof obj.object === 'undefined' ? obj : obj.object;
 		}
 		return object && object.object || object;
 	},
 	buildImage: function (image) {
 		var bitmap = image.bitmap;
 		
-		var canvas;
-		
-		if (sb.canvas) {
-			canvas = new sb.canvas(image.width, image.height);
-		} else {
-			canvas = document.createElement('canvas');
-			canvas.width = image.width;
-			canvas.height = image.height;
-		}
+		var canvas = image;
 		var ctx = canvas.getContext('2d');
 		
 		var data = ctx.createImageData(image.width, image.height);
@@ -660,8 +869,8 @@ sb.extend(sb.ObjectStream.prototype, {
 	jsonify: function (object, parent) {
 		var self = this,
 			json;
-		if (object && object.id && this.readFormats[object.id]) {
-			var format = this.readFormats[object.id];
+		if (object && object.id && this.formats[object.id]) {
+			var format = this.formats[object.id].read;
 			json = {};
 			for (var field in format) {
 				var value = format[field];
@@ -692,174 +901,386 @@ sb.extend(sb.ObjectStream.prototype, {
 		return object;
 	},
 	
-	/*createRef: function (object, table) {
-		table.push(object);
-		return {
-			id: 99,
-			index: index
-		};
-	},
-	
-	writeFormats: {
-		24: function (object, table, fields) {
-			for (var key in object) {
-				fields.push(this.createRef(key, table));
-				fields.push(this.createRef(object[key], table));
-			}
-		},
-		
-		124: [
-			function () {
-				
-			}
-			['objName', ]
-		]
-	},*/
-	
-	readFormats: {
-		124: {
-			objName: 6,
-			scripts: function (fields) {
-				var scripts = fields[8];
-				return scripts.map(function (script) {
-					return [script[0].x, script[0].y, sb.buildScript(script[1])];
-				});
-			},
-			sounds: function (fields) {
-				return fields[10].filter(function (media) {
-					return media.id === 164;
-				});
-			},
-			costumes: function (fields) {
-				return fields[10].filter(function (media) {
-					return media.id === 162;
-				});
-			},
-			currentCostumeIndex: function (fields, parent) {
-				return fields[10].filter(function (media) {
-					return media.id === 162;
-				}).indexOf(fields[11]);
-			},
-			scratchX: function (fields, parent) {
-				return fields[0].ox + fields[11].fields[2].x - parent.fields[0].cx / 2;
-			},
-			scratchY: function (fields, parent) {
-				return parent.fields[0].cy / 2 - (fields[0].oy + fields[11].fields[2].y);
-			},
-			scale: function (fields) {
-				return fields[13].x;
-			},
-			direction: 14,
-			rotationStyle: 15,
-			isDraggable: 18,
-			indexInLibrary: function (fields, parent) {
-				var library = parent.fields[16];
-				var i = library.length;
-				while (i--) {
-					if (library[i].fields === fields) {
-						return i;
+	formats: {
+		20: {
+			write: function (object, table, hint) {
+				var self = this;
+				return object.map(function (value, i) {
+					var id = hint || null;
+					if (id) {
+						id = Array.isArray(id) ? (id[i]) : id;
+						id = typeof id === 'number' ? id : keyId(value, i);
 					}
-				}
-				return -1;
-			},
-			visible: function (fields) {
-				return !(fields[4] & 1);
-			},
-			variables: function (fields) {
-				var vars = fields[7];
-				var varNames = Object.keys(vars);
-				return varNames.map(function (d) {
-					return {
-						name: d,
-						value: vars[d],
-						isPersistent: false
-					};
-				});
-			},
-			lists: 20
-		},
-		125: { 
-			objName: 6,
-			sounds: function (fields) {
-				return fields[10].filter(function (media) {
-					return media.id === 164;
-				});
-			},
-			costumes: function (fields) {
-				return fields[10].filter(function (media) {
-					return media.id === 162;
-				});
-			},
-			currentCostumeIndex: function (fields, parent) {
-				return fields[10].filter(function (media) {
-					return media.id === 162;
-				}).indexOf(fields[11]);
-			},
-			children: 2,
-			variables: function (fields) {
-				var vars = fields[7];
-				var varNames = Object.keys(vars);
-				return varNames.map(function (d) {
-					return {
-						name: d,
-						value: vars[d],
-						isPersistent: false
-					};
-				});
-			},
-			lists: function (fields) {
-				var lists = fields[20];
-				var listNames = Object.keys(lists);
-				return listNames.map(function (d) {
-					return lists[d];
-				});
-			},
-			scripts: function (fields) {
-				var scripts = fields[8];
-				return scripts.map(function (script) {
-					return [script[0].x, script[0].y, sb.buildScript(script[1])];
+					return self.createObject(table, value, id)
 				});
 			}
+		},
+		21: {
+			write: function (object, table, hint) {
+				var self = this;
+				return object.map(function (value, i) {
+					var id = hint || null;
+					if (id) {
+						id = Array.isArray(id) ? (id[i]) : id;
+						id = typeof id === 'number' ? id : keyId(value, i);
+					}
+					return self.createObject(table, value, id)
+				});
+			}
+		},
+		24: {
+			write: function (object, table, hint) {
+				var self = this;
+				var ids;
+				return object.map(function (pair, i) {
+					ids = hint || null;
+					if (ids) {
+						ids = Array.isArray(ids) ? (ids[i]) : ids;
+						ids = Array.isArray(ids) ? ids : (typeof ids === 'function' ? ids(pair[0], pair[1]) : [ids, ids]);
+					} else {
+						ids = [null, null]
+					}
+					return [self.createObject(table, pair[0], ids[0]), self.createObject(table, pair[1], ids[1])];
+				});
+			}
+		},
+		34: {
+			write: function (object, table, hint) {
+				return {
+					width: object.width,
+					height: object.height,
+					depth: 32,
+					offset: null,
+					bitmap: this.createObject(table, object.getContext('2d').getImageData(0, 0, object.width, object.height).data, 13)
+				}
+			}
+		},
+		124: {
+			version: 3,
+			read: {
+				objName: 6,
+				scripts: function (fields) {
+					var scripts = fields[8];
+					return scripts.map(function (script) {
+						return [script[0].x, script[0].y, sb.buildScript(script[1])];
+					});
+				},
+				sounds: function (fields) {
+					return fields[10].filter(function (media) {
+						return media.id === 164;
+					});
+				},
+				costumes: function (fields) {
+					return fields[10].filter(function (media) {
+						return media.id === 162;
+					});
+				},
+				currentCostumeIndex: function (fields, parent) {
+					return fields[10].filter(function (media) {
+						return media.id === 162;
+					}).indexOf(fields[11]);
+				},
+				scratchX: function (fields, parent) {
+					return fields[0].ox + fields[11].fields[2].x - parent.fields[0].cx / 2;
+				},
+				scratchY: function (fields, parent) {
+					return parent.fields[0].cy / 2 - (fields[0].oy + fields[11].fields[2].y);
+				},
+				scale: function (fields) {
+					return fields[13].x;
+				},
+				direction: function (fields, parent) {
+					return fields[14] + 90;
+				},
+				rotationStyle: 15,
+				isDraggable: 18,
+				indexInLibrary: function (fields, parent) {
+					var library = parent.fields[16];
+					var i = library.length;
+					while (i--) {
+						if (library[i].fields === fields) {
+							return i;
+						}
+					}
+					return -1;
+				},
+				visible: function (fields) {
+					return !(fields[4] & 1);
+				},
+				variables: function (fields) {
+					var vars = fields[7];
+					var varNames = Object.keys(vars);
+					return varNames.map(function (d) {
+						return {
+							name: d,
+							value: vars[d],
+							isPersistent: false
+						};
+					});
+				},
+				lists: 20,
+				volume: 16,
+				tempoBPM: 17
+			},
+			write: [
+				function (object, table) { // bounds
+					var costume = object.costumes[object.currentCostumeIndex];
+					var x = object.scratchX - costume.rotationCenterX;
+					var y = object.scratchY - costume.rotationCenterY;
+					return this.createObject(table, {
+						ox: x,
+						oy: y,
+						cx: x + costume.image.width,
+						cy: y + costume.image.height
+					}, 33);
+				},
+				function (object, table) { // owner
+					return this.createObject(table, this.object, 125);	
+				},
+				function (object, table) { // submorphs
+					return this.createObject(table, [], 20);	
+				},
+				function (object, table) { // color
+					return this.createObject(table, {
+						r: 255,
+						g: 255,
+						b: 255,
+						a: 255
+					}, 30);
+				},
+				0, // flags
+				null, // nil
+				function (object, table) { // objName
+					return this.createObject(table, object.objName, 14);
+				},
+				function (object, table) { // vars
+					return this.createObject(table, object.variables.map(function (v) {
+						return [v.name, v.value];
+					}), 24, function (key, value) {
+						return [14, typeof value === 'number' ? null : 14];
+					});
+				},
+				function (object, table) { // blocksBin
+					// TODO: Not much. :>
+					return this.createObject(table, [], 20);
+				},
+				false, // isClone
+				function (object, table) { // media
+					return this.createObject(table, object.costumes, 20, 162);
+				},
+				function (object, table) { // costume
+					return this.createObject(table, object.costumes[object.currentCostumeIndex], 162);
+				},
+				100, // visibility
+				function (object, table) { // scalePoint
+					return this.createObject(table, {
+						x: 1,
+						y: 1
+					}, 32);
+				},
+				function (object, table) { // rotationDegrees
+					return object.direction - 90;
+				},
+				function (object, table) { // rotationStyle
+					return this.createObject(table, object.rotationStyle, 10);
+				},
+				function (object, table) { // volume
+					return object.volume;
+				},
+				function (object, table) { // tempoBPM
+					return object.tempoBPM;
+				},
+				function (object, table) { // draggable
+					return object.isDraggable;
+				},
+				function (object, table) { // sceneStates
+					return this.createObject(table, [], 24);
+				},
+				function (object, table) { // lists
+					return this.createObject(table, [], 24);
+				}
+			]
+		},
+		125: {
+			version: 5,
+			read: {
+				objName: 6,
+				sounds: function (fields) {
+					return fields[10].filter(function (media) {
+						return media.id === 164;
+					});
+				},
+				costumes: function (fields) {
+					return fields[10].filter(function (media) {
+						return media.id === 162;
+					});
+				},
+				currentCostumeIndex: function (fields, parent) {
+					return fields[10].filter(function (media) {
+						return media.id === 162;
+					}).indexOf(fields[11]);
+				},
+				children: 2,
+				variables: function (fields) {
+					var vars = fields[7];
+					var varNames = Object.keys(vars);
+					return varNames.map(function (d) {
+						return {
+							name: d,
+							value: vars[d],
+							isPersistent: false
+						};
+					});
+				},
+				lists: function (fields) {
+					var lists = fields[20];
+					var listNames = Object.keys(lists);
+					return listNames.map(function (d) {
+						return lists[d];
+					});
+				},
+				scripts: function (fields) {
+					var scripts = fields[8];
+					return scripts.map(function (script) {
+						return [script[0].x, script[0].y, sb.buildScript(script[1])];
+					});
+				},
+				volume: 17,
+				tempoBPM: 18
+			},
+			write: [
+				function (object, table) { // bounds
+					// TODO: Dynamic size
+					return this.createObject(table, {
+						ox: 0,
+						oy: 0,
+						cx: 480,
+						cy: 360,
+					}, 33);
+				},
+				null, // owner
+				function (object, table) { // submorphs
+					return this.createObject(table, object.children, 20, 124);
+				},
+				function (object, table) { // color
+					return this.createObject(table, {
+						r: 255,
+						g: 255,
+						b: 255,
+						a: 255
+					}, 30);
+				},
+				0, // flags
+				null, // nil
+				function (object, table) { // objName
+					return this.createObject(table, object.objName, 9);
+				},
+				function (object, table) { // vars
+					return this.createObject(table, object.variables.map(function (v) {
+						return 	[v.name, v.value];
+					}), 24, function (key, value) {
+						return [14, typeof value === 'number' ? null : 14];
+					});
+				},
+				function (object, table) { // blocksBin
+					// TODO: Not much. :>
+					return this.createObject(table, [], 20);
+				},
+				false, // isClone
+				function (object, table) { // media
+					return this.createObject(table, object.costumes, 21, 162);
+				},
+				function (object, table) { // costume
+					return this.createObject(table, object.costumes[object.currentCostumeIndex], 162);
+				},
+				1, // zoom
+				0, // hPan
+				0, // vPan
+				null, // obsoleteSavedState
+				function (object, table) { // sprites
+					return this.createObject(table, [], 21);
+				},
+				function (object, table) { // volume
+					return object.volume;
+				},
+				function (object, table) { // tempoBPM
+					return object.tempoBPM;
+				},
+				function (object, table) { // sceneStates
+					return this.createObject(table, [], 24);
+				}
+			]
 		},
 		162: {
-			costumeName: 0,
-			rotationCenterX: function (fields) {
-				return fields[2].x;
+			read: {
+				costumeName: 0,
+				rotationCenterX: function (fields) {
+					return fields[2].x;
+				},
+				rotationCenterY: function (fields) {
+					return fields[2].y;
+				},
+				image: function (fields) {
+					return (fields[6] || fields[1]);
+				}
 			},
-			rotationCenterY: function (fields) {
-				return fields[2].y;
-			},
-			image: function (fields) {
-				return (fields[6] || fields[1]).canvas;
-			}
+			write: [
+				function (object, table) { // mediaName
+					return this.createObject(table, object.costumeName, 9);
+				},
+				function (object, table) { // form
+					return this.createObject(table, object.image, 34);
+				},
+				function (object, table) { // rotationCenter
+					return this.createObject(table, {
+						x: object.rotationCenterX,
+						y: object.rotationCenterY
+					}, 32);
+				},
+				null, // textBox
+				null, // jpegBytes
+				null
+				//function (object, table) { // compositeForm
+				//	return this.createObject(table, object.image, 34);
+				//}
+			]
 		},
-		164: {
-			soundName: 0,
-			sound: null
-			// TODO: implement sound
+		164: { // TODO: implement sound
+			read: {
+				soundName: 0,
+				sound: null
+			},
+			write: [
+				
+			]
 		},
 		175: {
-			listName: 8,
-			contents: 9,
-			isPersistent: false,
-			target: function (fields) {
-				return fields[10].fields[6];
+			read: {
+				listName: 8,
+				contents: 9,
+				isPersistent: false,
+				target: function (fields) {
+					return fields[10].fields[6];
+				},
+				x: function (fields) {
+					return fields[0].ox;
+				},
+				y: function (fields) {
+					return fields[0].oy;
+				},
+				width:  function (fields) {
+					return fields[0].cx - fields[0].ox;
+				},
+				height:  function (fields) {
+					return fields[0].cy - fields[0].oy;
+				},
+				visible: function (fields) {
+					return !!fields[1];
+				}
 			},
-			x: function (fields) {
-				return fields[0].ox;
-			},
-			y: function (fields) {
-				return fields[0].oy;
-			},
-			width:  function (fields) {
-				return fields[0].cx - fields[0].ox;
-			},
-			height:  function (fields) {
-				return fields[0].cy - fields[0].oy;
-			},
-			visible: function (fields) {
-				return !!fields[1];
-			}
+			write: [
+				
+			]
 		}
 	}
 });
@@ -880,29 +1301,49 @@ sb.buildScript = function (script) {
 	return script;
 };
 
+sb.objectName = function (obj) {
+	return obj ? (obj.fields && obj.fields[6] || obj) : '';
+};
+
 sb.blocks = {
-	EventHatMorph: function (block) {
+	'EventHatMorph': function (block) {
 		if (block[1] === 'Scratch-StartClicked') {
 			return ['whenGreenFlag'];
 		}
 		return ['whenIReceive', block[1]];
 	},
-	KeyEventHatMorph: 'whenKeyPressed',
-	MouseClickEventHatMorph: 'whenClicked',
+	'KeyEventHatMorph': 'whenKeyPressed',
+	'MouseClickEventHatMorph': 'whenClicked',
 	'showBackground:': 'lookLike:',
 	'nextBackground': 'nextCostume',
-	changeVariable: function (block) {
+	'changeVariable': function (block) {
 		return [block[2], block[1], block[3]];
 	},
 	'getAttribute:of:': function (block) {
-		return ['getAttribute:of:', 'not', 'important'] 
+		return ['getAttribute:of:', block[1], sb.objectName(block[2])]; 
 	},
 	'touching:': function (block) {
-		return ['touching:', 'not cool'];
+		return ['touching:', sb.objectName(block[1])];
 	},
 	'distanceTo:': function (block) {
-		return ['distanceTo:', 'also not cool'];
+		return ['distanceTo:', sb.objectName(block[1])];
+	},
+	'pointTowards:': function (block) {
+		return ['pointTowards:', sb.objectName(block[1])];
+	},
+	'gotoSpriteOrMouse:': function (block) {
+		return ['gotoSpriteOrMouse:', sb.objectName(block[1])];
 	}
+};
+
+sb.createCanvas = function (width, height) {
+	if (sb.canvas) {
+		return new sb.canvas(width, height);
+	}
+	var canvas = document.createElement('canvas');
+	canvas.width = width;
+	canvas.height = height;
+	return canvas;
 };
 
 (function () {

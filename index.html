@@ -7,6 +7,7 @@
     <script type="text/javascript" src="js/jszip/jszip-inflate.js"></script>
   </head>
   <body>
+    <input id="path" type="text">
   	<button id="read">read</button>
     <script type="text/javascript">
     	document.getElementById('read').addEventListener('click', function () {
@@ -15,10 +16,18 @@
 				console.log('Project1:', project1);
 			});
 			
-			window.project2 = new sb.Project('MarioBros.sb2');
+			/*window.project2 = new sb.Project('MarioBros.sb2');
 			project2.open(function (success) {
 				console.log('Project2:', project2);
-			});
+			});*/
+			
+			var path = document.getElementById('path').value;
+			if (path !== '') {
+				window.project = new sb.Project(path);
+				project.open(function (success) {
+					console.log('Project:', project);
+				});
+			}
 		});
     </script>
   </body>
