@@ -289,6 +289,50 @@ sb.extend(sb.WriteStream.prototype, {
 	}
 });
 
+
+sb.blocksBinWrite = function (object, table) {
+	return this.createObject(table, object.scripts.map(function (script) {
+		return [{
+				x: script[0],
+				y: script[1]
+			},
+			script[2]
+		];
+	}), 20, {
+		id: 20,
+		hint: [
+			32,
+			{
+				id: 20,
+				hint: {
+					id: 20,
+					hint: function block(object, i) {
+						if (Array.isArray(object)) {
+							return {
+								id: 20,
+								hint: block
+							};
+						}
+						var inline = [null, true, false];
+						if (inline.indexOf(object) !== -1) {
+							return null;
+						}
+						var type = typeof object;
+						if (i === 0) {
+							return 10;
+						} else if (type === 'string') {
+							return 9;
+						} else if (type === 'number') {
+							return null;
+						}
+						throw new Error('No idea');
+					}
+				}
+			}
+		]
+	});
+};
+
 sb.ObjectStream = function (stream) {
 	this.stream = stream;
 };
@@ -476,6 +520,8 @@ sb.extend(sb.ObjectStream.prototype, {
 		case 5: // SmallInteger16
 			this.stream.int16(object);
 			break;
+		case 6:
+		case 7:
 			// TODO: large numbers
 		case 8:
 			this.stream.float64(object);
@@ -909,9 +955,13 @@ sb.extend(sb.ObjectStream.prototype, {
 					var id = hint || null;
 					if (id) {
 						id = Array.isArray(id) ? (id[i]) : id;
-						id = typeof id === 'number' ? id : keyId(value, i);
+						id = typeof id === 'function' ? id(value, i) : id;
 					}
-					return self.createObject(table, value, id)
+					if (id && id.id && id.hint) {
+						return self.createObject(table, value, id.id, id.hint);
+					} else {
+						return self.createObject(table, value, id);
+					}
 				});
 			}
 		},
@@ -1060,10 +1110,7 @@ sb.extend(sb.ObjectStream.prototype, {
 						return [14, typeof value === 'number' ? null : 14];
 					});
 				},
-				function (object, table) { // blocksBin
-					// TODO: Not much. :>
-					return this.createObject(table, [], 20);
-				},
+				sb.blocksBinWrite, // blocksBin
 				false, // isClone
 				function (object, table) { // media
 					return this.createObject(table, object.costumes, 20, 162);
@@ -1182,10 +1229,7 @@ sb.extend(sb.ObjectStream.prototype, {
 						return [14, typeof value === 'number' ? null : 14];
 					});
 				},
-				function (object, table) { // blocksBin
-					// TODO: Not much. :>
-					return this.createObject(table, [], 20);
-				},
+				sb.blocksBinWrite, // blocksBin
 				false, // isClone
 				function (object, table) { // media
 					return this.createObject(table, object.costumes, 21, 162);
@@ -1239,10 +1283,8 @@ sb.extend(sb.ObjectStream.prototype, {
 				},
 				null, // textBox
 				null, // jpegBytes
-				null
-				//function (object, table) { // compositeForm
-				//	return this.createObject(table, object.image, 34);
-				//}
+				null // compositeForm
+				// TODO: Implement textBox/compositeForm?
 			]
 		},
 		164: { // TODO: implement sound
