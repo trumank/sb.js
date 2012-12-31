@@ -59,7 +59,6 @@ sb.extend(sb.Project.prototype, {
 		stream.uint32();
 		var ostream = new sb.ObjectStream(stream);
 		this.info = ostream.readObject();
-		window.buffer = stream.buffer; 
 		this.stage = ostream.readObject();
 		onload(true);
 	},
@@ -150,7 +149,7 @@ sb.extend(sb.Project.prototype, {
 		
 		objectStream.writeObject(this.stage, 125);
 		
-		return stream.buffer();
+		return stream.bytes();
 	}
 });
 
@@ -233,8 +232,8 @@ sb.extend(sb.WriteStream.prototype, {
 		newArray.set(this.array, 0);
 		this.array = newArray;
 	},
-	buffer: function () {
-		return this.array.buffer.slice(0, this.index);
+	bytes: function () {
+		return new Uint8Array(this.array, 0, this.index);
 	},
 	utf8: function (string) {
 		for (var i = 0; i < string.length; i++) {
