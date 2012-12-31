@@ -290,7 +290,28 @@ sb.extend(sb.WriteStream.prototype, {
 
 
 sb.blocksBinWrite = function (object, table) {
+	function crawl(block) {
+		if (typeof block !== 'object') {
+			return block;
+		}
+		if (Array.isArray(block) && Array.isArray(block[0])) {
+			return block.map(function (b) {
+				return crawl(b);
+			})
+		} else if (sb.blocks.write[block[0]]) {
+			return block = sb.blocks.write[block[0]].map(function (part) {
+				return typeof part === 'number' ? block[part] : (typeof part === 'function' ? part(block) : part);
+			})
+		}
+		return block.map(function (part) {
+			if (Array.isArray(part)) {
+				return crawl(part);
+			}
+			return part;
+		});
+	}
 	return this.createObject(table, object.scripts.map(function (script) {
+			script[2] = crawl(script[2]);
 		return [{
 				x: script[0],
 				y: script[1]
@@ -1219,7 +1240,7 @@ sb.extend(sb.ObjectStream.prototype, {
 				0, // flags
 				null, // nil
 				function (object, table) { // objName
-					return this.createObject(table, object.objName, 9);
+					return this.createObject(table, object.objName, 14);
 				},
 				function (object, table) { // vars
 					return this.createObject(table, object.variables.map(function (v) {
@@ -1269,7 +1290,7 @@ sb.extend(sb.ObjectStream.prototype, {
 			},
 			write: [
 				function (object, table) { // mediaName
-					return this.createObject(table, object.costumeName, 9);
+					return this.createObject(table, object.costumeName, 14);
 				},
 				function (object, table) { // form
 					return this.createObject(table, object.image, 34);
@@ -1330,7 +1351,7 @@ sb.buildScript = function (script) {
 	for (var i = 0; i < script.length; i++) {
 		var block = script[i];
 		if (Array.isArray(block)) {
-			var refactorer = sb.blocks[block[0]];
+			var refactorer = sb.blocks.read[block[0]];
 			if (typeof refactorer === 'string') {
 				block[0] = refactorer;
 			} else if (typeof refactorer === 'function') {
@@ -1347,33 +1368,43 @@ sb.objectName = function (obj) {
 };
 
 sb.blocks = {
-	'EventHatMorph': function (block) {
-		if (block[1] === 'Scratch-StartClicked') {
-			return ['whenGreenFlag'];
+	read: {
+		'EventHatMorph': function (block) {
+			if (block[1] === 'Scratch-StartClicked') {
+				return ['whenGreenFlag'];
+			}
+			return ['whenIReceive', block[1]];
+		},
+		'KeyEventHatMorph': 'whenKeyPressed',
+		'MouseClickEventHatMorph': 'whenClicked',
+		'showBackground:': 'lookLike:',
+		'nextBackground': 'nextCostume',
+		'changeVariable': function (block) {
+			return [block[2], block[1], block[3]];
+		},
+		'getAttribute:of:': function (block) {
+			return ['getAttribute:of:', block[1], sb.objectName(block[2])]; 
+		},
+		'touching:': function (block) {
+			return ['touching:', sb.objectName(block[1])];
+		},
+		'distanceTo:': function (block) {
+			return ['distanceTo:', sb.objectName(block[1])];
+		},
+		'pointTowards:': function (block) {
+			return ['pointTowards:', sb.objectName(block[1])];
+		},
+		'gotoSpriteOrMouse:': function (block) {
+			return ['gotoSpriteOrMouse:', sb.objectName(block[1])];
 		}
-		return ['whenIReceive', block[1]];
 	},
-	'KeyEventHatMorph': 'whenKeyPressed',
-	'MouseClickEventHatMorph': 'whenClicked',
-	'showBackground:': 'lookLike:',
-	'nextBackground': 'nextCostume',
-	'changeVariable': function (block) {
-		return [block[2], block[1], block[3]];
-	},
-	'getAttribute:of:': function (block) {
-		return ['getAttribute:of:', block[1], sb.objectName(block[2])]; 
-	},
-	'touching:': function (block) {
-		return ['touching:', sb.objectName(block[1])];
-	},
-	'distanceTo:': function (block) {
-		return ['distanceTo:', sb.objectName(block[1])];
-	},
-	'pointTowards:': function (block) {
-		return ['pointTowards:', sb.objectName(block[1])];
-	},
-	'gotoSpriteOrMouse:': function (block) {
-		return ['gotoSpriteOrMouse:', sb.objectName(block[1])];
+	write: {
+		'whenGreenFlag': ['EventHatMorph', 'Scratch-StartClicked'],
+		'whenIReceive': ['EventHatMorph', 1],
+		'whenClicked': ['MouseClickEventHatMorph'],
+		'whenKeyPressed': ['KeyEventHatMorph', 1],
+		'setVar:to:': ['changeVariable', 1, 0, 2],
+		'changeVar:by:': ['changeVariable', 1, 0, 2],
 	}
 };
 
