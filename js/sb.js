@@ -233,7 +233,7 @@ sb.extend(sb.WriteStream.prototype, {
 		this.array = newArray;
 	},
 	bytes: function () {
-		return new Uint8Array(this.array, 0, this.index);
+		return new Uint8Array(this.array.buffer, 0, this.index);
 	},
 	utf8: function (string) {
 		for (var i = 0; i < string.length; i++) {
